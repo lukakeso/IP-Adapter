@@ -1,0 +1,18 @@
+#slurm scripts
+/slurm_files
+
+# generated results
+/results
+/logs
+
+# big data files
+/models
+/datasets
+
+# other
+/demos
+/tools/*.ipynb
+/tools/*.txt
+*.egg-info/
+__pycache__/
+*.pyc

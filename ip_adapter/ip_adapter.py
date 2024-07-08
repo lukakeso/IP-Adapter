@@ -2,8 +2,8 @@ import os
 from typing import List
 
 import torch
-from diffusers import StableDiffusionPipeline
-from diffusers.pipelines.controlnet import MultiControlNetModel
+from diffusers import StableDiffusionPipeline, StableDiffusionInpaintPipeline, StableDiffusionControlNetInpaintPipeline
+from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 from PIL import Image
 from safetensors import safe_open
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
@@ -20,10 +20,58 @@ if is_torch2_available():
     from .attention_processor import (
         IPAttnProcessor2_0 as IPAttnProcessor,
     )
+    from diffusers.models.attention_processor import (
+        IPAdapterAttnProcessor2_0 as IPAdapterAttnProcessor
+    )
 else:
     from .attention_processor import AttnProcessor, CNAttnProcessor, IPAttnProcessor
+    from diffusers.models.attention_processor import IPAdapterAttnProcessor
+
 from .resampler import Resampler
 
+mapping_names1 = ['down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight',
+               'down_blocks.0.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight',
+               'down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'down_blocks.0.attentions.1.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'down_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'down_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'down_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.1.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.1.attentions.1.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.1.attentions.2.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.2.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.2.attentions.1.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.2.attentions.2.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.3.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.3.attentions.1.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'up_blocks.3.attentions.2.transformer_blocks.0.attn2.processor.to_v_ip.0.weight', 
+               'mid_block.attentions.0.transformer_blocks.0.attn2.processor.to_k_ip.0.weight', 
+               'mid_block.attentions.0.transformer_blocks.0.attn2.processor.to_v_ip.0.weight']
+
+mapping_names2 = ["1.to_k_ip.0.weight", "1.to_v_ip.0.weight", "3.to_k_ip.0.weight", "3.to_v_ip.0.weight", 
+               "5.to_k_ip.0.weight", "5.to_v_ip.0.weight", "7.to_k_ip.0.weight", "7.to_v_ip.0.weight", 
+               "9.to_k_ip.0.weight", "9.to_v_ip.0.weight", "11.to_k_ip.0.weight", "11.to_v_ip.0.weight", 
+               "13.to_k_ip.0.weight", "13.to_v_ip.0.weight", "15.to_k_ip.0.weight", "15.to_v_ip.0.weight", 
+               "17.to_k_ip.0.weight", "17.to_v_ip.0.weight", "19.to_k_ip.0.weight", "19.to_v_ip.0.weight", 
+               "21.to_k_ip.0.weight", "21.to_v_ip.0.weight", "23.to_k_ip.0.weight", "23.to_v_ip.0.weight", 
+               "25.to_k_ip.0.weight", "25.to_v_ip.0.weight", "27.to_k_ip.0.weight", "27.to_v_ip.0.weight", 
+               "29.to_k_ip.0.weight", "29.to_v_ip.0.weight", "31.to_k_ip.0.weight", "31.to_v_ip.0.weight"]
+
+mapping = {k: v for k, v in zip(mapping_names1, mapping_names2)}
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -64,31 +112,40 @@ class MLPProjModel(torch.nn.Module):
 
 
 class IPAdapter:
-    def __init__(self, sd_pipe, image_encoder_path, ip_ckpt, device, num_tokens=4):
+    def __init__(self, sd_pipe, image_encoder_path, ip_ckpt, device, dtype=torch.float16, num_tokens=4):
         self.device = device
         self.image_encoder_path = image_encoder_path
         self.ip_ckpt = ip_ckpt
         self.num_tokens = num_tokens
+        self.weight_dtype = dtype
 
         self.pipe = sd_pipe.to(self.device)
-        self.set_ip_adapter()
+        #self.set_ip_adapter()
 
         # load image encoder
-        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path).to(
-            self.device, dtype=torch.float16
-        )
-        self.clip_image_processor = CLIPImageProcessor()
+        # self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path).to(
+        #     self.device, dtype=torch.float16
+        # )
+        # self.clip_image_processor = CLIPImageProcessor()
+        
+        if isinstance(image_encoder_path, CLIPVisionModelWithProjection):
+            self.image_encoder = image_encoder_path
+        else:
+            self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(image_encoder_path).to(
+                self.device, dtype=self.weight_dtype
+            )
+            self.clip_image_processor = CLIPImageProcessor()
         # image proj model
         self.image_proj_model = self.init_proj()
 
-        self.load_ip_adapter()
+        self.load_ip_adapter(ip_ckpt=ip_ckpt)
 
     def init_proj(self):
         image_proj_model = ImageProjModel(
             cross_attention_dim=self.pipe.unet.config.cross_attention_dim,
             clip_embeddings_dim=self.image_encoder.config.projection_dim,
             clip_extra_context_tokens=self.num_tokens,
-        ).to(self.device, dtype=torch.float16)
+        ).to(self.device, dtype=self.weight_dtype)
         return image_proj_model
 
     def set_ip_adapter(self):
@@ -107,12 +164,12 @@ class IPAdapter:
             if cross_attention_dim is None:
                 attn_procs[name] = AttnProcessor()
             else:
-                attn_procs[name] = IPAttnProcessor(
+                attn_procs[name] = IPAdapterAttnProcessor(
                     hidden_size=hidden_size,
                     cross_attention_dim=cross_attention_dim,
                     scale=1.0,
                     num_tokens=self.num_tokens,
-                ).to(self.device, dtype=torch.float16)
+                ).to(self.device, dtype=self.weight_dtype)
         unet.set_attn_processor(attn_procs)
         if hasattr(self.pipe, "controlnet"):
             if isinstance(self.pipe.controlnet, MultiControlNetModel):
@@ -121,15 +178,16 @@ class IPAdapter:
             else:
                 self.pipe.controlnet.set_attn_processor(CNAttnProcessor(num_tokens=self.num_tokens))
 
-    def load_ip_adapter(self):
+    def load_ip_adapter(self, ip_ckpt):
+        self.ip_ckpt = ip_ckpt
         if os.path.splitext(self.ip_ckpt)[-1] == ".safetensors":
             state_dict = {"image_proj": {}, "ip_adapter": {}}
             with safe_open(self.ip_ckpt, framework="pt", device="cpu") as f:
                 for key in f.keys():
-                    if key.startswith("image_proj."):
-                        state_dict["image_proj"][key.replace("image_proj.", "")] = f.get_tensor(key)
-                    elif key.startswith("ip_adapter."):
-                        state_dict["ip_adapter"][key.replace("ip_adapter.", "")] = f.get_tensor(key)
+                    if key.startswith("image_proj_model."):
+                        state_dict["image_proj"][key.replace("image_proj_model.", "")] = f.get_tensor(key)
+                    elif key.endswith("_ip.0.weight"):
+                        state_dict["ip_adapter"][mapping[key.replace("unet.", "")]] = f.get_tensor(key)
         else:
             state_dict = torch.load(self.ip_ckpt, map_location="cpu")
         self.image_proj_model.load_state_dict(state_dict["image_proj"])
@@ -142,9 +200,9 @@ class IPAdapter:
             if isinstance(pil_image, Image.Image):
                 pil_image = [pil_image]
             clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
-            clip_image_embeds = self.image_encoder(clip_image.to(self.device, dtype=torch.float16)).image_embeds
+            clip_image_embeds = self.image_encoder(clip_image.to(self.device, dtype=self.weight_dtype)).image_embeds
         else:
-            clip_image_embeds = clip_image_embeds.to(self.device, dtype=torch.float16)
+            clip_image_embeds = clip_image_embeds.to(self.device, dtype=self.weight_dtype)
         image_prompt_embeds = self.image_proj_model(clip_image_embeds)
         uncond_image_prompt_embeds = self.image_proj_model(torch.zeros_like(clip_image_embeds))
         return image_prompt_embeds, uncond_image_prompt_embeds
@@ -174,46 +232,65 @@ class IPAdapter:
         else:
             num_prompts = clip_image_embeds.size(0)
 
-        if prompt is None:
-            prompt = "best quality, high quality"
-        if negative_prompt is None:
-            negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+        if not("prompt_embeds" in kwargs):
+            if prompt is None:
+                prompt = "best quality, high quality"
+            if negative_prompt is None:
+                negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
 
-        if not isinstance(prompt, List):
-            prompt = [prompt] * num_prompts
-        if not isinstance(negative_prompt, List):
-            negative_prompt = [negative_prompt] * num_prompts
+            if not isinstance(prompt, List):
+                prompt = [prompt] * num_prompts
+            if not isinstance(negative_prompt, List):
+                negative_prompt = [negative_prompt] * num_prompts
 
         image_prompt_embeds, uncond_image_prompt_embeds = self.get_image_embeds(
             pil_image=pil_image, clip_image_embeds=clip_image_embeds
         )
-        bs_embed, seq_len, _ = image_prompt_embeds.shape
-        image_prompt_embeds = image_prompt_embeds.repeat(1, num_samples, 1)
-        image_prompt_embeds = image_prompt_embeds.view(bs_embed * num_samples, seq_len, -1)
-        uncond_image_prompt_embeds = uncond_image_prompt_embeds.repeat(1, num_samples, 1)
-        uncond_image_prompt_embeds = uncond_image_prompt_embeds.view(bs_embed * num_samples, seq_len, -1)
-
-        with torch.inference_mode():
-            prompt_embeds_, negative_prompt_embeds_ = self.pipe.encode_prompt(
-                prompt,
-                device=self.device,
-                num_images_per_prompt=num_samples,
-                do_classifier_free_guidance=True,
-                negative_prompt=negative_prompt,
-            )
-            prompt_embeds = torch.cat([prompt_embeds_, image_prompt_embeds], dim=1)
-            negative_prompt_embeds = torch.cat([negative_prompt_embeds_, uncond_image_prompt_embeds], dim=1)
-
+        
         generator = get_generator(seed, self.device)
-
+        ip_adapter_image_embeds = []
+        #if isinstance(self.pipe, StableDiffusionPipeline) or isinstance(self.pipe, StableDiffusionInpaintPipeline):
+            # used with new pipelines that include ip-adapter
+            
+        ip_adapter_image_embeds.append(torch.cat([uncond_image_prompt_embeds, image_prompt_embeds]))
+        
         images = self.pipe(
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
+            ip_adapter_image_embeds=ip_adapter_image_embeds,
+            num_images_per_prompt=num_samples,
             generator=generator,
             **kwargs,
         ).images
+        #else:
+            
+        # bs_embed, seq_len, _ = image_prompt_embeds.shape
+        # image_prompt_embeds = image_prompt_embeds.repeat(1, num_samples, 1)
+        # image_prompt_embeds = image_prompt_embeds.view(bs_embed * num_samples, seq_len, -1)
+        # uncond_image_prompt_embeds = uncond_image_prompt_embeds.repeat(1, num_samples, 1)
+        # uncond_image_prompt_embeds = uncond_image_prompt_embeds.view(bs_embed * num_samples, seq_len, -1)
+
+        # with torch.inference_mode():
+        #     prompt_embeds_, negative_prompt_embeds_ = self.pipe.encode_prompt(
+        #         prompt,
+        #         device=self.device,
+        #         num_images_per_prompt=num_samples,
+        #         do_classifier_free_guidance=True,
+        #         negative_prompt=negative_prompt,
+        #     )
+        #     prompt_embeds = torch.cat([prompt_embeds_, image_prompt_embeds], dim=1)
+        #     negative_prompt_embeds = torch.cat([negative_prompt_embeds_, uncond_image_prompt_embeds], dim=1)
+        
+        # images = self.pipe(
+        #     prompt_embeds=prompt_embeds,
+        #     negative_prompt_embeds=negative_prompt_embeds,
+        #     guidance_scale=guidance_scale,
+        #     num_inference_steps=num_inference_steps,
+        #     generator=generator,
+        #     **kwargs,
+        # ).images
 
         return images
 
@@ -296,21 +373,28 @@ class IPAdapterPlus(IPAdapter):
             embedding_dim=self.image_encoder.config.hidden_size,
             output_dim=self.pipe.unet.config.cross_attention_dim,
             ff_mult=4,
-        ).to(self.device, dtype=torch.float16)
+        ).to(self.device, dtype=self.weight_dtype)
         return image_proj_model
 
     @torch.inference_mode()
     def get_image_embeds(self, pil_image=None, clip_image_embeds=None):
-        if isinstance(pil_image, Image.Image):
-            pil_image = [pil_image]
-        clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
-        clip_image = clip_image.to(self.device, dtype=torch.float16)
-        clip_image_embeds = self.image_encoder(clip_image, output_hidden_states=True).hidden_states[-2]
-        image_prompt_embeds = self.image_proj_model(clip_image_embeds)
-        uncond_clip_image_embeds = self.image_encoder(
-            torch.zeros_like(clip_image), output_hidden_states=True
-        ).hidden_states[-2]
-        uncond_image_prompt_embeds = self.image_proj_model(uncond_clip_image_embeds)
+        with torch.no_grad():
+            if pil_image is not None:
+                if isinstance(pil_image, Image.Image):
+                    pil_image = [pil_image]
+                #clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
+                clip_image = pil_image
+                clip_image = clip_image.to(self.device, dtype=self.weight_dtype)
+                clip_image_embeds = self.image_encoder(clip_image, output_hidden_states=True).hidden_states[-2]
+            else:
+                clip_image_embeds = clip_image_embeds.to(self.device, dtype=self.weight_dtype)
+            image_prompt_embeds = self.image_proj_model(clip_image_embeds)
+            #this commented part was here from IP-adapter repo
+            uncond_clip_image_embeds = self.image_encoder(torch.zeros_like(clip_image).to(self.device, dtype=self.weight_dtype), output_hidden_states=True).hidden_states[-2]
+            uncond_image_prompt_embeds = self.image_proj_model(uncond_clip_image_embeds)
+            #this uncommented part is in the diffusion inpaint pipeline
+            #uncond_image_prompt_embeds = self.image_proj_model(torch.zeros_like(clip_image_embeds))
+
         return image_prompt_embeds, uncond_image_prompt_embeds
 
 
@@ -321,7 +405,7 @@ class IPAdapterFull(IPAdapterPlus):
         image_proj_model = MLPProjModel(
             cross_attention_dim=self.pipe.unet.config.cross_attention_dim,
             clip_embeddings_dim=self.image_encoder.config.hidden_size,
-        ).to(self.device, dtype=torch.float16)
+        ).to(self.device, dtype=self.weight_dtype)
         return image_proj_model
 
 

@@ -19,17 +19,18 @@ from accelerate.utils import ProjectConfiguration
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel, StableDiffusionInpaintPipelineLegacy
 from diffusers import StableDiffusionInpaintPipeline, StableDiffusionControlNetInpaintPipeline
 from diffusers import ControlNetModel
+from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, AutoModel
 
 from ip_adapter.resampler import Resampler
 
 from ip_adapter.utils import is_torch2_available
 if is_torch2_available():  
-    from ip_adapter.attention_processor import IPAttnProcessor2_0 as IPAttnProcessor, AttnProcessor2_0 as AttnProcessor
+    from ip_adapter.attention_processor import IPAttnProcessor2_0 as IPAttnProcessor, AttnProcessor2_0 as AttnProcessor, CNAttnProcessor2_0 as CNAttnProcessor
     from diffusers.models.attention_processor import IPAdapterAttnProcessor2_0 as IPAdapterAttnProcessor#, AttnProcessor2_0 as AttnProcessor
 else:
-    from ip_adapter.attention_processor import IPAttnProcessor, AttnProcessor
+    from ip_adapter.attention_processor import IPAttnProcessor, AttnProcessor, CNAttnProcessor
     from diffusers.models.attention_processor import IPAdapterAttnProcessor#, AttnProcessor
 
 from ip_adapter import IPAdapterPlus as IPAdapterPlus_test
@@ -82,8 +83,8 @@ class MyDataset(torch.utils.data.Dataset):
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
         ])
-        #self.clip_image_processor = CLIPImageProcessor(size={"shortest_edge": 256}, crop_size={"height": 256, "width": 256})
-        self.clip_image_processor = CLIPImageProcessor()
+        #self.image_processor = CLIPImageProcessor(size={"shortest_edge": 512}, crop_size={"height": 512, "width": 512})
+        self.image_processor = CLIPImageProcessor()
         
     def __getitem__(self, idx):
         item = self.data[idx] 
@@ -103,7 +104,7 @@ class MyDataset(torch.utils.data.Dataset):
         
         image = self.transform_im(raw_image.convert("RGB"))
         image_mask = self.transform_mask(mask_image.convert("L"))
-        clip_image = self.clip_image_processor(images=ref_image, return_tensors="pt").pixel_values
+        clip_image = self.image_processor(images=ref_image, return_tensors="pt").pixel_values
         densepose = self.transform_mask(densepose_image)
         control_image = torch.cat((transforms.Resize((512, 512))(clip_image[0]),densepose),dim = 0)
         
@@ -194,8 +195,7 @@ class IPAdapter(torch.nn.Module):
     def __init__(self, unet, image_proj_model, adapter_modules, ckpt_path=None, controlnet=None):
         super().__init__()
         self.unet = unet
-        if controlnet is not None:
-            self.controlnet = controlnet
+        self.controlnet = controlnet if controlnet != None else None
         self.image_proj_model = image_proj_model
         self.adapter_modules = adapter_modules
 
@@ -203,12 +203,17 @@ class IPAdapter(torch.nn.Module):
             self.load_from_checkpoint(ckpt_path)
 
     
-    def forward(self, noisy_latents, timesteps, prompt_embeds, image_embeds, control_images=None):
+    def forward(self, noisy_latents, mask, masked_images_latents, timesteps, prompt_embeds, image_embeds, control_images=None):
         ip_embeds = self.image_proj_model(image_embeds)
         
-        if control_images is not None:
+        # concatenate latents and masks for 9 channel unet/controlnet
+        latent_model_input = torch.cat([noisy_latents, mask, masked_images_latents], dim=1)
+        
+        if self.controlnet == None:
+            down_block_res_samples, mid_block_res_sample = None, None
+        else:
             down_block_res_samples, mid_block_res_sample = self.controlnet(
-                noisy_latents,
+                latent_model_input,
                 timesteps,
                 encoder_hidden_states=prompt_embeds,
                 controlnet_cond=control_images,
@@ -216,11 +221,9 @@ class IPAdapter(torch.nn.Module):
                 guess_mode=False,
                 return_dict=False,
             )
-        else:
-            down_block_res_samples, mid_block_res_sample = None
         
         # Predict the noise residual
-        noise_pred = self.unet(noisy_latents, timesteps, 
+        noise_pred = self.unet(latent_model_input, timesteps, 
                                encoder_hidden_states=prompt_embeds,
                                down_block_additional_residuals=down_block_res_samples,
                                mid_block_additional_residual=mid_block_res_sample,
@@ -277,6 +280,12 @@ def parse_args():
         type=str,
         default=None,
         help="Path to pretrained ip adapter model. If not specified weights are initialized randomly.",
+    )
+    parser.add_argument(
+        "--pretrained_controlnet_path",
+        type=str,
+        default=None,
+        help="Path to pretrained controlnet model. If not specified weights are not initialized.",
     )
     parser.add_argument(
         "--num_tokens",
@@ -441,13 +450,19 @@ def main():
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
+    vae = AutoencoderKL.from_pretrained("models/stabilityai/sd-vae-ft-mse", subfolder="vae")
+    #vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
-    image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_path)
+    #image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_path)
+    image_encoder = AutoModel.from_pretrained(args.image_encoder_path)
+    
     #controlnet = ControlNetModel.from_single_file("/d/hpc/home/lk6760/FRI_HOME/PRETRAINED_MODELS/dense_control.safetensors") #4channel
-    controlnet = ControlNetModel.from_single_file("/d/hpc/home/lk6760/FRI_HOME/PRETRAINED_MODELS/dense_control_6_viton.ckpt", 
-                                    config_file="/d/hpc/home/lk6760/FRI_HOME/PRETRAINED_MODELS/dense_control_6_viton.yaml",)
-
+    controlnet = None
+    if args.pretrained_controlnet_path:
+        controlnet = ControlNetModel.from_single_file(args.pretrained_controlnet_path, 
+                                                      config_file=args.pretrained_controlnet_path.replace(".ckpt", ".yaml"))
+    
+    # pretrained_model_name_or_path = "models/runwayml/stable-diffusion-inpainting"
     # pipe = StableDiffusionInpaintPipeline.from_pretrained(
     #     args.pretrained_model_name_or_path,
     #     scheduler=noise_scheduler,
@@ -457,28 +472,29 @@ def main():
     #     safety_checker=None,
     #     torch_dtype=torch.float16
     # )
-    # pipe = StableDiffusionInpaintPipeline(
-    #     scheduler=noise_scheduler,
-    #     vae=vae,
-    #     unet=unet,
-    #     text_encoder=None,
-    #     tokenizer=None,
-    #     feature_extractor=None,
-    #     safety_checker=None
-    #     #torch_dtype=torch.float16
-    # )
-    
-    pipe = StableDiffusionControlNetInpaintPipeline(
-        scheduler=noise_scheduler,
-        vae=vae,
-        unet=unet,
-        controlnet=controlnet,
-        text_encoder=None,
-        tokenizer=None,
-        feature_extractor=None,
-        safety_checker=None,
-        #torch_dtype=torch.float16
-    )
+    if controlnet == None:
+        pipe = StableDiffusionInpaintPipeline(
+            scheduler=noise_scheduler,
+            vae=vae,
+            unet=unet,
+            text_encoder=None,
+            tokenizer=None,
+            feature_extractor=None,
+            safety_checker=None
+            #torch_dtype=torch.float16
+        )
+    else:
+        pipe = StableDiffusionControlNetInpaintPipeline(
+            scheduler=noise_scheduler,
+            vae=vae,
+            unet=unet,
+            controlnet=controlnet,
+            text_encoder=None,
+            tokenizer=None,
+            feature_extractor=None,
+            safety_checker=None,
+            #torch_dtype=torch.float16
+        )
     
     # freeze parameters of models to save more memory
     unet.requires_grad_(False)
@@ -523,8 +539,15 @@ def main():
             }
             #attn_procs[name] = IPAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, num_tokens=args.num_tokens)
             attn_procs[name] = IPAdapterAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, num_tokens=args.num_tokens)
+            #attn_procs[name] = IPAdapterAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, num_tokens=16)
             attn_procs[name].load_state_dict(weights)
-            
+    if hasattr(pipe, "controlnet"):
+        if isinstance(pipe.controlnet, MultiControlNetModel):
+            for controlnet in pipe.controlnet.nets:
+                controlnet.set_attn_processor(CNAttnProcessor(num_tokens=args.num_tokens))
+        else:
+            pipe.controlnet.set_attn_processor(CNAttnProcessor(num_tokens=args.num_tokens))
+    
     unet.set_attn_processor(attn_procs)
     adapter_modules = torch.nn.ModuleList(unet.attn_processors.values())
     
@@ -592,6 +615,7 @@ def main():
         
         print("logging samples...")
         grids = []
+
         for test_sample in test_dataloader:
             #image_embeds = image_encoder(test_sample["clip_images"].to(accelerator.device, dtype=weight_dtype), output_hidden_states=True).hidden_states[-2]
             with torch.no_grad():
@@ -599,7 +623,12 @@ def main():
                            to_pil_image(test_sample["images_mask"].squeeze(), mode="L").resize((512, 512)), 
                            to_pil_image(denormalize(test_sample["clip_images"].squeeze()), mode="RGB").resize((512, 512))]
                 
-                generated_images = ip_model_test.generate(pil_image=test_sample["clip_images"], num_samples=3, num_inference_steps=50,
+                
+                clip_image_embeds = image_encoder(test_sample["clip_images"].to(accelerator.device, dtype=weight_dtype), output_hidden_states=True).hidden_states[-2]
+                uncond_clip_image_embeds = image_encoder(torch.zeros_like(test_sample["clip_images"]).to(accelerator.device, dtype=weight_dtype), output_hidden_states=True).hidden_states[-2]
+                clip_image_embeds = (clip_image_embeds, uncond_clip_image_embeds)
+                
+                generated_images = ip_model_test.generate(clip_image_embeds=clip_image_embeds, num_samples=3, num_inference_steps=50,
                         seed=42, image=denormalize(test_sample["images"]), mask_image=test_sample["images_mask"], strength=0.7, 
                         prompt_embeds=text_encoder(test_sample["text_input_ids"].to(accelerator.device))[0],
                         negative_prompt_embeds=negative_prompt_embeds, scale=0.6,
@@ -619,10 +648,12 @@ def main():
     
     for epoch in range(0, args.num_train_epochs):
         #begin = time.perf_counter()
+        # ip_adapter.train()
         if accelerator.is_main_process:
             time.sleep(0.3)
             print("Epoch: ", epoch)
             progress_bar.reset()
+        accelerator.wait_for_everyone()
         for step, batch in enumerate(train_dataloader):
             #load_data_time = time.perf_counter() - begin
             
@@ -665,12 +696,9 @@ def main():
                 with torch.no_grad():
                     prompt_embeds = text_encoder(batch["text_input_ids"].to(accelerator.device))[0]
                 
-                
-                # concatenate latents and masks for 9 channel unet
-                latent_model_input = torch.cat([noisy_latents, mask, masked_images_latents], dim=1)
-                
                 # denoising step
-                noise_pred = ip_adapter(latent_model_input, timesteps, prompt_embeds, image_embeds,
+                noise_pred = ip_adapter(noisy_latents, mask, masked_images_latents, 
+                                        timesteps, prompt_embeds, image_embeds,
                                         control_images=control_images)
                 
                 # loss
@@ -710,7 +738,11 @@ def main():
                             # orig_images = [to_pil_image(denormalize(test_sample["images"].squeeze()), mode="RGB").resize((512, 512)), 
                             #                to_pil_image(test_sample["images_mask"].squeeze(), mode="L").resize((512, 512)), 
                             #                to_pil_image(denormalize(test_sample["clip_images"].squeeze()), mode="RGB").resize((512, 512))]
-                            generated_images = ip_model_test.generate(pil_image=test_sample["clip_images"], num_samples=3, num_inference_steps=50,
+                            clip_image_embeds = image_encoder(test_sample["clip_images"].to(accelerator.device, dtype=weight_dtype), output_hidden_states=True).hidden_states[-2]
+                            uncond_clip_image_embeds = image_encoder(torch.zeros_like(test_sample["clip_images"]).to(accelerator.device, dtype=weight_dtype), output_hidden_states=True).hidden_states[-2]
+                            clip_image_embeds = (clip_image_embeds, uncond_clip_image_embeds)
+                            
+                            generated_images = ip_model_test.generate(clip_image_embeds=clip_image_embeds, num_samples=3, num_inference_steps=50,
                                     seed=42, image=denormalize(test_sample["images"]), mask_image=test_sample["images_mask"], strength=0.7, 
                                     prompt_embeds=text_encoder(test_sample["text_input_ids"].to(accelerator.device))[0],
                                     negative_prompt_embeds=negative_prompt_embeds, scale=0.6,
@@ -723,6 +755,7 @@ def main():
                         grids.append(wandb.Image(grid, caption="generated outputs"))
                     
                     accelerator.log({"test_samples": grids}, step=global_step)
+                accelerator.wait_for_everyone()
                 
             
             #begin = time.perf_counter()

@@ -6,7 +6,9 @@ from diffusers import StableDiffusionPipeline, StableDiffusionInpaintPipeline, S
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 from PIL import Image
 from safetensors import safe_open
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, CLIPVisionModel
+from transformers import Dinov2Model, BitImageProcessor
+from transformers import AutoModel
 
 from .utils import is_torch2_available, get_generator
 
@@ -120,25 +122,24 @@ class IPAdapter:
         self.weight_dtype = dtype
 
         self.pipe = sd_pipe.to(self.device)
-        #self.set_ip_adapter()
-
-        # load image encoder
-        # self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path).to(
-        #     self.device, dtype=torch.float16
-        # )
-        # self.clip_image_processor = CLIPImageProcessor()
+        #self.set_ip_adapter()     #disabled during training
         
-        if isinstance(image_encoder_path, CLIPVisionModelWithProjection):
-            self.image_encoder = image_encoder_path
-        else:
-            self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(image_encoder_path).to(
+        if isinstance(image_encoder_path, str):
+            self.image_encoder = AutoModel.from_pretrained(image_encoder_path).to(
                 self.device, dtype=self.weight_dtype
             )
-            self.clip_image_processor = CLIPImageProcessor()
+        else:
+            self.image_encoder = image_encoder_path
+            
+        if isinstance(self.image_encoder, Dinov2Model):        
+            self.image_processor=BitImageProcessor.from_pretrained("/d/hpc/projects/FRI/lk6760/FRI_HOME/EXPERIMENTS/IP-Adapter/models/facebook/dinov2-large/preprocessor_config.json")
+        else:
+            self.image_processor = CLIPImageProcessor()   
         # image proj model
         self.image_proj_model = self.init_proj()
-
-        self.load_ip_adapter(ip_ckpt=ip_ckpt)
+        
+        if ip_ckpt != None:
+            self.load_ip_adapter(ip_ckpt=ip_ckpt)
 
     def init_proj(self):
         image_proj_model = ImageProjModel(
@@ -199,7 +200,7 @@ class IPAdapter:
         if pil_image is not None:
             if isinstance(pil_image, Image.Image):
                 pil_image = [pil_image]
-            clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
+            clip_image = self.image_processor(images=pil_image, return_tensors="pt").pixel_values
             clip_image_embeds = self.image_encoder(clip_image.to(self.device, dtype=self.weight_dtype)).image_embeds
         else:
             clip_image_embeds = clip_image_embeds.to(self.device, dtype=self.weight_dtype)
@@ -230,16 +231,17 @@ class IPAdapter:
         if pil_image is not None:
             num_prompts = 1 if isinstance(pil_image, Image.Image) else len(pil_image)
         else:
-            num_prompts = clip_image_embeds.size(0)
+            num_prompts = clip_image_embeds[0].size(0) #expecting to get a tuple of tensors here
 
         if not("prompt_embeds" in kwargs):
             if prompt is None:
                 prompt = "best quality, high quality"
-            if negative_prompt is None:
-                negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
-
             if not isinstance(prompt, List):
                 prompt = [prompt] * num_prompts
+                
+        if not("negative_prompt_embeds" in kwargs):
+            if negative_prompt is None:
+                negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
             if not isinstance(negative_prompt, List):
                 negative_prompt = [negative_prompt] * num_prompts
 
@@ -382,15 +384,19 @@ class IPAdapterPlus(IPAdapter):
             if pil_image is not None:
                 if isinstance(pil_image, Image.Image):
                     pil_image = [pil_image]
-                #clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
-                clip_image = pil_image
+                clip_image = self.image_processor(images=pil_image, return_tensors="pt").pixel_values
+                #clip_image = pil_image
                 clip_image = clip_image.to(self.device, dtype=self.weight_dtype)
                 clip_image_embeds = self.image_encoder(clip_image, output_hidden_states=True).hidden_states[-2]
+                uncond_clip_image_embeds = self.image_encoder(torch.zeros_like(clip_image).to(self.device, dtype=self.weight_dtype), output_hidden_states=True).hidden_states[-2]
             else:
+                clip_image_embeds, uncond_clip_image_embeds = clip_image_embeds
                 clip_image_embeds = clip_image_embeds.to(self.device, dtype=self.weight_dtype)
+                uncond_clip_image_embeds = uncond_clip_image_embeds.to(self.device, dtype=self.weight_dtype)
+
             image_prompt_embeds = self.image_proj_model(clip_image_embeds)
             #this commented part was here from IP-adapter repo
-            uncond_clip_image_embeds = self.image_encoder(torch.zeros_like(clip_image).to(self.device, dtype=self.weight_dtype), output_hidden_states=True).hidden_states[-2]
+            # uncond_clip_image_embeds = self.image_encoder(torch.zeros_like(clip_image).to(self.device, dtype=self.weight_dtype), output_hidden_states=True).hidden_states[-2]
             uncond_image_prompt_embeds = self.image_proj_model(uncond_clip_image_embeds)
             #this uncommented part is in the diffusion inpaint pipeline
             #uncond_image_prompt_embeds = self.image_proj_model(torch.zeros_like(clip_image_embeds))
@@ -429,7 +435,7 @@ class IPAdapterPlusXL(IPAdapter):
     def get_image_embeds(self, pil_image):
         if isinstance(pil_image, Image.Image):
             pil_image = [pil_image]
-        clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
+        clip_image = self.image_processor(images=pil_image, return_tensors="pt").pixel_values
         clip_image = clip_image.to(self.device, dtype=torch.float16)
         clip_image_embeds = self.image_encoder(clip_image, output_hidden_states=True).hidden_states[-2]
         image_prompt_embeds = self.image_proj_model(clip_image_embeds)
